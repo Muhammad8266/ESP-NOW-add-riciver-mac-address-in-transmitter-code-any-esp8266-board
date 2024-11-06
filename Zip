@@ -1,0 +1,125 @@
+#include <ESP8266WiFi.h>
+#include <espnow.h>
+
+// Define the MAC address as a placeholder to be replaced by the receiver's MAC
+String receiverMacAddressStr = "Add receiver MAC address here"; // Replace with actual receiver MAC for the transmitter
+
+uint8_t receiverMacAddress[6]; // Hexadecimal MAC address storage
+bool isTransmitter = false;    // Flag to identify if board is acting as transmitter
+unsigned long lastReceivedTime = 0; // To track the last time data was received
+
+// GPIO pins D1 to D8
+const int pins[] = {5, 4, 0, 2, 14, 12, 13, 15};
+uint8_t pinStatus[8]; // Pin state storage
+
+void onDataReceive(uint8_t *mac, uint8_t *incomingData, uint8_t len);
+void onDataSent(uint8_t *mac, uint8_t sendStatus);
+
+// Function to convert MAC address from string to hexadecimal
+bool convertMacAddress(String macStr, uint8_t *macArray) {
+  int macLen = macStr.length();
+  if (macLen != 17) return false; // Invalid MAC format
+  int idx = 0;
+  for (int i = 0; i < 6; i++) {
+    macArray[i] = strtol(macStr.substring(idx, idx + 2).c_str(), NULL, 16);
+    idx += 3;
+  }
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+
+  // Print this device's MAC address
+  String thisMac = WiFi.macAddress();
+  Serial.print("This Device MAC Address: ");
+  Serial.println(thisMac);
+
+  // Check if this board is transmitter or receiver based on the MAC address presence
+  if (receiverMacAddressStr != "Add receiver MAC address here") {
+    // Convert and store the receiver's MAC address in hexadecimal format
+    if (convertMacAddress(receiverMacAddressStr, receiverMacAddress)) {
+      isTransmitter = true;  // Set as transmitter
+      Serial.println("This board is Transmitter.");
+      Serial.print("Receiver MAC Address: ");
+      Serial.println(receiverMacAddressStr);
+    } else {
+      Serial.println("Invalid Receiver MAC Address format.");
+      return;
+    }
+  } else {
+    Serial.println("This board is Receiver.");
+  }
+
+  // Initialize ESP-NOW
+  if (esp_now_init() != 0) {
+    Serial.println("ESP-NOW initialization failed.");
+    return;
+  }
+
+  esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
+  esp_now_register_recv_cb(onDataReceive);
+  esp_now_register_send_cb(onDataSent);
+
+  // If transmitter, add receiver as peer
+  if (isTransmitter) {
+    esp_now_add_peer(receiverMacAddress, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
+  }
+
+  // Initialize pins
+  for (int i = 0; i < 8; i++) {
+    pinMode(pins[i], isTransmitter ? INPUT_PULLUP : OUTPUT);
+    if (!isTransmitter) {
+      digitalWrite(pins[i], LOW); // Turn off LEDs initially
+    }
+    pinStatus[i] = LOW;
+  }
+}
+
+void loop() {
+  if (isTransmitter) {
+    uint8_t currentPinState[8];
+    bool dataToSend = false;
+
+    // Check pin states
+    for (int i = 0; i < 8; i++) {
+      currentPinState[i] = digitalRead(pins[i]);
+      if (currentPinState[i] == LOW) dataToSend = true;
+    }
+
+    if (dataToSend) {
+      esp_now_send(receiverMacAddress, currentPinState, sizeof(currentPinState));
+      Serial.println("Data sent to receiver.");
+      lastReceivedTime = millis();
+    }
+  } else {
+    if (millis() - lastReceivedTime > 1000) {
+      for (int i = 0; i < 8; i++) {
+        digitalWrite(pins[i], LOW); // Turn off LEDs if no data received
+      }
+    }
+  }
+}
+
+// Receive callback for receiver to update LEDs
+void onDataReceive(uint8_t *mac, uint8_t *incomingData, uint8_t len) {
+  if (!isTransmitter) {
+    for (int i = 0; i < 8; i++) {
+      digitalWrite(pins[i], incomingData[i] == LOW ? HIGH : LOW);
+    }
+    Serial.println("LED states updated based on received data.");
+    lastReceivedTime = millis();
+  }
+}
+
+// Send callback to check send status
+void onDataSent(uint8_t *mac, uint8_t sendStatus) {
+  Serial.print("Data sent to ");
+  for (int i = 0; i < 6; i++) {
+    Serial.print(mac[i], HEX);
+    if (i < 5) Serial.print(":");
+  }
+  Serial.print(" - Status: ");
+  Serial.println(sendStatus == 0 ? "Success" : "Failure");
+}
